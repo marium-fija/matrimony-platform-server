@@ -33,7 +33,7 @@ async function run() {
     const db = client.db("matrimony_platform_DB");
     const usersCollection = db.collection("users");
     const biodataCollection = db.collection("biodatas");
-
+    const successStoryCollection = db.collection("successStories");
 
      // CREATE biodata
     app.post("/biodatas", async (req, res) => {
@@ -83,7 +83,34 @@ app.put("/biodatas/email/:email", async (req, res) => {
       res.send(biodatas);
     });
 
-    
+    // CREATE success story
+app.post("/success-stories", async (req, res) => {
+  const story = req.body;
+  try {
+    const result = await successStoryCollection.insertOne(story);
+    res.status(201).send({
+      message: "Success story added successfully",
+      storyId: result.insertedId
+    });
+  } catch (err) {
+    console.error("Error adding success story:", err);
+    res.status(500).send({ error: "Failed to add success story" });
+  }
+});
+
+// GET all success stories (latest first)
+app.get("/success-stories", async (req, res) => {
+  try {
+    const stories = await successStoryCollection
+      .find()
+      .sort({ marriageDate: -1 })
+      .toArray();
+    res.send(stories);
+  } catch (err) {
+    console.error("Error fetching success stories:", err);
+    res.status(500).send({ error: "Failed to fetch success stories" });
+  }
+});
 
 
     
