@@ -1,7 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const jwt = require("jsonwebtoken");
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -9,9 +10,6 @@ const port = process.env.PORT || 5000;
 // Middleware
 app.use(cors());
 app.use(express.json());
-
-
-
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.eey3bcc.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 
@@ -24,6 +22,30 @@ const client = new MongoClient(uri, {
   }
 });
 
+// JWT middleware
+const verifyToken = (req, res, next) => {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).send({ message: "Unauthorized access" });
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+    if (err) return res.status(403).send({ message: "Forbidden access" });
+    req.user = decoded;
+    next();
+  });
+};
+
+// Verify Admin middleware
+const verifyAdmin = async (req, res, next) => {
+  const email = req.user?.email;
+  const user = await usersCollection.findOne({ email: email });
+  if (user?.role !== "admin") {
+    return res.status(403).send({ message: "Forbidden: Admin only" });
+  }
+  next();
+};
+
+let usersCollection, biodataCollection, successStoryCollection, paymentsCollection;
+
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
@@ -34,6 +56,7 @@ async function run() {
     const usersCollection = db.collection("users");
     const biodataCollection = db.collection("biodatas");
     const successStoryCollection = db.collection("successStories");
+    const paymentsCollection = db.collection("payments")
 
      // CREATE biodata
     app.post("/biodatas", async (req, res) => {
@@ -113,31 +136,114 @@ app.get("/success-stories", async (req, res) => {
 });
 
 
-    
-
-    // POST route to add a new user
+// Generate JWT token
+    app.post("/jwt", (req, res) => {
+      const user = req.body;
+      const token = jwt.sign(user, process.env.JWT_SECRET, { expiresIn: "7d" });
+      res.send({ token });
+    });
+    // ------------------- Users -------------------
     app.post('/users', async (req, res) => {
-      const user = req.body; // expect { name, email, password, photoURL }
-      if (!user.name || !user.email) {
-        return res.status(400).send({ error: 'Name, email, and password are required' });
-      }
-
-      try {
-        const result = await usersCollection.insertOne(user);
-        res.status(201).send({
-          message: 'User created successfully',
-          userId: result.insertedId
-        });
-        } catch (err) {
-        console.error(err);
-        res.status(500).send({ error: 'Failed to create user' });
-      }
+      const user = req.body;
+      user.role = user.role || "user";
+      const result = await usersCollection.insertOne(user);
+      res.status(201).send(result);
     });
 
-    // GET all users (optional, for testing)
+    // GET all users 
     app.get('/users', async (req, res) => {
       const users = await usersCollection.find().toArray();
       res.send(users);
+    });
+
+    // GET user role by email
+app.get("/users/:email/role", async (req, res) => {
+  const email = req.params.email;
+  const user = await usersCollection.findOne({ email });
+  if (!user) return res.status(404).send({ role: "user" });
+  res.send({ role: user.role });
+});
+
+// admin check route add
+app.get("/users/admin/:email", async (req, res) => {
+  const email = req.params.email;
+  const user = await usersCollection.findOne({ email });
+  res.send({ admin: user?.role === "admin" || false });
+});
+
+
+    app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
+      const search = req.query.search || "";
+      const query = search ? { name: { $regex: search, $options: "i" } } : {};
+      const users = await usersCollection.find(query).toArray();
+      res.send(users);
+    });
+
+    app.patch("/users/admin/:id", verifyToken, verifyAdmin, async (req, res) => {
+      const id = req.params.id;
+      const result = await usersCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { role: "admin" } }
+      );
+      res.send(result);
+    });
+
+    app.patch("/users/premium/:id", verifyToken, verifyAdmin, async (req, res) => {
+      const id = req.params.id;
+      const result = await usersCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { premium: true } }
+      );
+      res.send(result);
+    });
+
+    // ------------------- Admin Dashboard -------------------
+    app.get("/admin/stats", verifyToken, verifyAdmin, async (req, res) => {
+      const totalBiodatas = await biodataCollection.estimatedDocumentCount();
+      const maleCount = await biodataCollection.countDocuments({ biodataType: "Male" });
+      const femaleCount = await biodataCollection.countDocuments({ biodataType: "Female" });
+      const premiumCount = await biodataCollection.countDocuments({ Premium: true });
+      const revenue = await paymentsCollection.aggregate([
+        { $group: { _id: null, total: { $sum: "$amount" } } }
+      ]).toArray();
+
+      res.send({
+        totalBiodatas,
+        maleCount,
+        femaleCount,
+        premiumCount,
+        revenue: revenue[0]?.total || 0
+      });
+    });
+
+    // ------------------- Premium Approval -------------------
+    app.get("/approvedPremium", verifyToken, verifyAdmin, async (req, res) => {
+      const requests = await usersCollection.find({ requestPremium: true }).toArray();
+      res.send(requests);
+    });
+
+    app.patch("/approvedPremium/:id", verifyToken, verifyAdmin, async (req, res) => {
+      const id = req.params.id;
+      const result = await usersCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { premium: true }, $unset: { requestPremium: "" } }
+      );
+      res.send(result);
+    });
+
+    // ------------------- Contact Request Approval -------------------
+    app.get("/approvedContactRequest", verifyToken, verifyAdmin, async (req, res) => {
+      const requests = await usersCollection.find({ requestContact: { $exists: true } }).toArray();
+      res.send(requests);
+    });
+
+    app.patch("/approvedContactRequest/:id", verifyToken, verifyAdmin, async (req, res) => {
+      const id = req.params.id;
+      const result = await usersCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { approvedContact: true }, $unset: { requestContact: "" } }
+      );
+      res.send(result);
     });
 
     // Send a ping to confirm a successful connection
@@ -150,9 +256,6 @@ app.get("/success-stories", async (req, res) => {
 }
 run().catch(console.dir);
 
-
-
-
 app.get('/', (req, res) => {
     res.send('Matrimony platform Server is running');
 });
@@ -161,3 +264,31 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
     console.log(`Server is listening on port ${port}`);
 });
+
+
+
+
+// // POST route to add a new user
+//     app.post('/users', async (req, res) => {
+//       const user = req.body; 
+//        user.role = user.role || "user";
+//       if (!user.name || !user.email) {
+//         return res.status(400).send({ error: 'Name, email, and password are required' });
+//       }
+//       try {
+//         const result = await usersCollection.insertOne(user);
+//         res.status(201).send({
+//           message: 'User created successfully',
+//           userId: result.insertedId
+//         });
+//         } catch (err) {
+//         console.error(err);
+//         res.status(500).send({ error: 'Failed to create user' });
+//       }
+//     });
+
+//     // GET all users (optional, for testing)
+//     app.get('/users', async (req, res) => {
+//       const users = await usersCollection.find().toArray();
+//       res.send(users);
+//     });
